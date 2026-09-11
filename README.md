@@ -4,7 +4,6 @@ https://autods-ai-studio.streamlit.app/
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.30+-FF4B4B.svg)](https://streamlit.io)
 [![Tests](https://img.shields.io/badge/tests-347%20passed-brightgreen.svg)](https://pytest.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **AutoDS AI Studio** is a production-grade, AI-powered autonomous data science and analytics platform built with **Streamlit**, **Pandas**, **Scikit-Learn**, **OpenRouter LLMs**, and **Python**.
 

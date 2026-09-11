@@ -288,6 +288,4 @@ pytest tests/test_date_output_format.py -v
 
 ---
 
-## 🛡️ License
 
-This project is licensed under the [MIT License](LICENSE).

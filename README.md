@@ -1,4 +1,5 @@
 # 🤖 AutoDS AI Studio
+https://autods-ai-studio.streamlit.app/
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.30+-FF4B4B.svg)](https://streamlit.io)

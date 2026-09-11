@@ -1,0 +1,40 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.streamlit/secrets.toml
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Data (keep directory structure)
+data/raw/*
+data/processed/*
+data/reports/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/reports/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

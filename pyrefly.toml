@@ -1,0 +1,15 @@
+[tool.pyrefly]
+project_includes = [
+    "app.py",
+    "core/",
+    "models/",
+    "services/",
+    "ui/",
+    "utils/",
+    "tests/",
+]
+project_excludes = [
+    "**/__pyrefly_virtual__/**",
+    "**/.pytest_cache/**",
+    "**/__pycache__/**",
+]

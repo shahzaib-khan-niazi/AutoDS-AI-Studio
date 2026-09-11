@@ -1,0 +1,1 @@
+"""Structure detection service package."""

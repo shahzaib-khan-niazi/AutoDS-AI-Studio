@@ -5,10 +5,28 @@ from models.repair import RepairAction, RepairOperation, RepairRecord
 from core.logging import logger
 from core.exceptions import RepairError
 from services.repair.duplicates import remove_duplicate_rows
-from services.repair.columns import rename_columns
+from services.repair.columns import (
+    rename_columns,
+    remove_specific_columns,
+    remove_specific_rows,
+    remove_rows_and_columns,
+    replace_value_in_column,
+)
 from services.repair.missing import drop_empty_rows, drop_empty_columns, drop_high_missing_columns, fill_missing
 from services.repair.types import convert_to_numeric, convert_to_datetime
-from services.repair.structural import unpivot, flatten_headers, explode_multi_value_cells, remove_repeated_headers, remove_metadata_rows
+from services.repair.structural import (
+    unpivot,
+    flatten_headers,
+    explode_multi_value_cells,
+    remove_repeated_headers,
+    remove_metadata_rows,
+    remove_spacer_rows_cols,
+    unpivot_horizontal_category_blocks,
+    remove_subtotal_elements,
+    auto_reconstruct_structure,
+    reconstruct_embedded_records,
+)
+
 from services.repair.outliers import handle_outliers
 from services.repair.whitespace import strip_whitespace
 from services.repair.standardize import standardize_values
@@ -141,6 +159,50 @@ def dispatch(
                 )
                 last_record = rec
             return current_df, last_record if last_record is not None else RepairRecord(operation="normalize_dates", success=True)
+
+        elif operation == RepairOperation.REMOVE_SPACER_ROWS_COLS:
+            return remove_spacer_rows_cols(df)
+
+        elif operation == RepairOperation.UNPIVOT_HORIZONTAL_CATEGORY_BLOCKS:
+            return unpivot_horizontal_category_blocks(df)
+
+        elif operation == RepairOperation.REMOVE_SUBTOTAL_ELEMENTS:
+            preserve_totals = bool(action.parameters.get("preserve_totals_if_records", True))
+            return remove_subtotal_elements(df, preserve_totals_if_records=preserve_totals)
+
+        elif operation == RepairOperation.AUTO_RECONSTRUCT_STRUCTURE:
+            repaired_df, recs = auto_reconstruct_structure(df)
+            last_rec = recs[-1] if recs else RepairRecord(operation="auto_reconstruct_structure", success=True)
+            return repaired_df, last_rec
+
+        elif operation == RepairOperation.RECONSTRUCT_EMBEDDED_RECORDS:
+            labels = action.target or action.parameters.get("field_labels")
+            return reconstruct_embedded_records(df, field_labels=labels)
+
+        elif operation == RepairOperation.REMOVE_ROWS:
+            row_indices = action.parameters.get("row_indices", [])
+            cond_desc = action.parameters.get("condition_desc")
+            reason = action.reason or "User removed specific rows"
+            return remove_specific_rows(df, row_indices=row_indices, condition_desc=cond_desc, reason=reason)
+
+        elif operation == RepairOperation.REMOVE_COLUMNS:
+            cols = action.target or action.parameters.get("columns", [])
+            reason = action.reason or "User removed specific columns"
+            return remove_specific_columns(df, columns=cols, reason=reason)
+
+        elif operation == RepairOperation.REMOVE_ROWS_AND_COLUMNS:
+            row_indices = action.parameters.get("row_indices", [])
+            cols = action.target or action.parameters.get("columns", [])
+            cond_desc = action.parameters.get("condition_desc")
+            reason = action.reason or "User removed specific rows and columns"
+            return remove_rows_and_columns(df, row_indices=row_indices, columns=cols, condition_desc=cond_desc, reason=reason)
+
+        elif operation == RepairOperation.REPLACE_VALUES:
+            col = action.parameters.get("column") or (action.target[0] if action.target else None)
+            old_val = action.parameters.get("old_value", "")
+            new_val = action.parameters.get("new_value", "")
+            reason = action.reason or f"User replaced '{old_val}' with '{new_val if new_val != '' else '[EMPTY]'}' in column '{col}'"
+            return replace_value_in_column(df, column=col, old_value=old_val, new_value=new_val, reason=reason)
 
         else:
             raise RepairError(

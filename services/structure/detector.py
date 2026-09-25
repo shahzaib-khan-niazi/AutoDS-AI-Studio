@@ -20,9 +20,14 @@ _RECOMMENDED_ACTIONS: dict[StructureType, str] = {
     StructureType.PIVOT_TABLE: "Consider unpivoting to normalize the data",
     StructureType.CROSSTAB: "Consider unpivoting to normalize the contingency table",
     StructureType.MULTI_HEADER: "Consider flattening headers or removing metadata rows",
+    StructureType.REPEATED_CATEGORY_BLOCKS: "Reshape repeated horizontal category blocks into normalized records",
+    StructureType.SPACER_ARTIFACTS: "Remove empty spacer rows and columns",
+    StructureType.SUBTOTAL_COLUMNS_ROWS: "Review and isolate or strip subtotal/summary columns/rows",
+    StructureType.METADATA_BANNERS: "Promote true header row and strip top/bottom metadata banner rows",
     StructureType.TIME_SERIES: "Ensure datetime column is properly parsed and set as index if needed",
     StructureType.SURVEY: "No structural changes needed; consider encoding responses",
     StructureType.TRANSACTIONAL: "No structural changes needed; verify datetime parsing",
+    StructureType.EMBEDDED_STRUCTURED_RECORDS: "Reconstruct embedded structured text records into clean multi-column table",
     StructureType.UNKNOWN: "Manual inspection recommended",
 }
 

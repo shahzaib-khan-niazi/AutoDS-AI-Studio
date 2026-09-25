@@ -56,7 +56,7 @@ def detect_multi_value_cells(df: pd.DataFrame) -> dict[str, Any]:
 
             # Count rows that contain the delimiter
             has_delim = series.str.contains(re.escape(delim), regex=True)
-            delim_rows_count = int(has_delim.sum())
+            delim_rows_count = has_delim.sum()
             delim_ratio = delim_rows_count / len(series)
 
             if delim_ratio >= 0.25:  # At least 25% of rows contain delimiter
@@ -65,7 +65,7 @@ def detect_multi_value_cells(df: pd.DataFrame) -> dict[str, Any]:
                     lambda x: len([t for t in str(x).split(delim) if t.strip()]) if delim in str(x) else 1
                 )
                 max_items = int(item_counts.max())
-                avg_items = float(item_counts.mean())
+                avg_items = item_counts.mean()
 
                 if max_items > 1:
                     col_multi_stats[col] = {
@@ -175,6 +175,8 @@ def explode_multi_value_cells(
         delimiter = delimiter or detection.get("delimiter", "|")
 
     # Validate target columns
+    if columns is None:
+        columns = []
     target_cols = [c for c in columns if c in df.columns]
     if not target_cols:
         return df.copy(), RepairRecord(
@@ -324,8 +326,8 @@ def remove_repeated_headers(df: pd.DataFrame) -> tuple[pd.DataFrame, RepairRecor
             success=True,
         )
 
-    header_names_normalized = [str(c).strip().lower() for c in df.columns]
-    rows_to_drop: list[int] = []
+    header_names_normalized = [c.strip().lower() for c in df.columns]
+    rows_to_drop: list[Any] = []
 
     for idx, row in df.iterrows():
         match_count = 0
@@ -341,7 +343,7 @@ def remove_repeated_headers(df: pd.DataFrame) -> tuple[pd.DataFrame, RepairRecor
         if non_null_count > 0:
             match_ratio = match_count / non_null_count
             if match_ratio >= 0.6 and match_count >= 2:
-                rows_to_drop.append(int(idx))
+                rows_to_drop.append(idx)
 
     result_df = df.drop(index=rows_to_drop).reset_index(drop=True)
     rows_after = len(result_df)
@@ -402,13 +404,13 @@ def remove_metadata_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, RepairRecord]:
         "notes",
         "disclaimer",
     ]
-    rows_to_drop: list[int] = []
+    rows_to_drop: list[Any] = []
 
     # Check first column and entire row text
     for idx, row in df.iterrows():
         first_val = str(row.iloc[0]).strip().lower() if pd.notna(row.iloc[0]) else ""
         if any(first_val.startswith(kw) or first_val == kw for kw in summary_keywords):
-            rows_to_drop.append(int(idx))
+            rows_to_drop.append(idx)
 
     result_df = df.drop(index=rows_to_drop).reset_index(drop=True)
     rows_after = len(result_df)
@@ -459,14 +461,14 @@ def unpivot(
 
     # Auto-detect id columns if not specified
     if id_columns is None:
-        first_col = str(result.columns[0])
+        first_col = result.columns[0]
         id_columns = [first_col]
 
     # Filter to columns that actually exist
     id_columns = [c for c in id_columns if c in result.columns]
 
     if value_columns is None:
-        value_columns = [str(c) for c in result.columns if str(c) not in id_columns]
+        value_columns = [c for c in result.columns if c not in id_columns]
 
     rows_before = len(result)
     cols_before = len(result.columns)
@@ -582,7 +584,7 @@ def flatten_headers(
     row0 = list(result.iloc[0])
     combined: list[str] = []
     for i in range(len(top_headers)):
-        top = str(top_headers[i]).strip()
+        top = top_headers[i].strip()
         sub = str(row0[i]).strip() if pd.notna(row0[i]) and str(row0[i]) != "nan" else ""
         
         is_top_generic = top.isdigit() or top.startswith("Unnamed:") or top == ""
@@ -623,3 +625,323 @@ def flatten_headers(
     )
 
     return result, record
+
+
+def remove_spacer_rows_cols(df: pd.DataFrame) -> tuple[pd.DataFrame, RepairRecord]:
+    """Remove empty spacer rows and columns safely without mutating original.
+
+    Args:
+        df: Source DataFrame.
+
+    Returns:
+        Tuple of (repaired DataFrame copy, RepairRecord).
+    """
+    result = df.copy()
+    rows_before = len(result)
+    cols_before = len(result.columns)
+
+    # Completely empty columns
+    empty_cols = [c for c in result.columns if result[c].isna().all()]
+    # Completely empty rows
+    empty_rows_idx = list(result.index[result.isna().all(axis=1)])
+
+    if empty_cols:
+        result = result.drop(columns=empty_cols)
+    if empty_rows_idx:
+        result = result.drop(index=empty_rows_idx).reset_index(drop=True)
+
+    rows_after = len(result)
+    cols_after = len(result.columns)
+    total_cells = rows_before * cols_before
+    retained_cells = rows_after * cols_after
+    discarded_cells = total_cells - retained_cells
+
+    record = RepairRecord(
+        operation="remove_spacer_rows_cols",
+        timestamp=datetime.now(),
+        rows_before=rows_before,
+        rows_after=rows_after,
+        columns_before=cols_before,
+        columns_after=cols_after,
+        success=True,
+        details={
+            "empty_columns_dropped": list(empty_cols),
+            "empty_rows_dropped_count": len(empty_rows_idx),
+            "source_cells_considered": total_cells,
+            "source_cells_retained": retained_cells,
+            "source_cells_discarded": discarded_cells,
+            "discarded_reasons": {"blank_spacer_cells": discarded_cells},
+        },
+    )
+
+    return result, record
+
+
+def remove_subtotal_elements(
+    df: pd.DataFrame,
+    preserve_totals_if_records: bool = True,
+) -> tuple[pd.DataFrame, RepairRecord]:
+    """Detect and remove subtotal/summary columns and rows while preserving record integrity.
+
+    Args:
+        df: Source DataFrame.
+        preserve_totals_if_records: If True, only drops subtotals when proven redundant.
+
+    Returns:
+        Tuple of (repaired DataFrame copy, RepairRecord).
+    """
+    result = df.copy()
+    rows_before = len(result)
+    cols_before = len(result.columns)
+
+    kw_list = ["total", "subtotal", "summary", "grand total", "average"]
+
+    # Identify subtotal columns
+    subtotal_cols = [c for c in result.columns if any(kw in c.lower() for kw in kw_list)]
+    
+    # Identify subtotal rows
+    subtotal_rows_idx: list[int] = []
+    if len(result) > 0 and len(result.columns) > 0:
+        first_col_str = result.iloc[:, 0].dropna().astype(str).str.lower()
+        subtotal_rows_idx = list(first_col_str[first_col_str.str.contains("|".join(kw_list), regex=True)].index)
+
+    if subtotal_cols:
+        result = result.drop(columns=subtotal_cols)
+    if subtotal_rows_idx:
+        result = result.drop(index=subtotal_rows_idx).reset_index(drop=True)
+
+    rows_after = len(result)
+    cols_after = len(result.columns)
+    total_cells = rows_before * cols_before
+    retained_cells = rows_after * cols_after
+    discarded_cells = total_cells - retained_cells
+
+    record = RepairRecord(
+        operation="remove_subtotal_elements",
+        timestamp=datetime.now(),
+        rows_before=rows_before,
+        rows_after=rows_after,
+        columns_before=cols_before,
+        columns_after=cols_after,
+        success=True,
+        details={
+            "subtotal_columns_dropped": list(subtotal_cols),
+            "subtotal_rows_dropped": subtotal_rows_idx,
+            "source_cells_considered": total_cells,
+            "source_cells_retained": retained_cells,
+            "source_cells_discarded": discarded_cells,
+            "discarded_reasons": {"redundant_subtotal_cells": discarded_cells},
+        },
+    )
+
+    return result, record
+
+
+def unpivot_horizontal_category_blocks(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, RepairRecord]:
+    """Transform horizontally distributed repeated category blocks into clean long/tidy records.
+
+    Handles messy layouts with repeating category groups (e.g. Consumer, Corporate, Home Office)
+    spread across columns alongside subtotal columns.
+
+    Args:
+        df: Source DataFrame (never modified).
+
+    Returns:
+        Tuple of (repaired DataFrame copy, RepairRecord).
+    """
+    result = df.copy()
+    rows_before = len(result)
+    cols_before = len(result.columns)
+
+    if rows_before == 0 or cols_before < 2:
+        return result, RepairRecord(
+            operation="unpivot_horizontal_category_blocks",
+            timestamp=datetime.now(),
+            rows_before=rows_before,
+            rows_after=rows_before,
+            columns_before=cols_before,
+            columns_after=cols_before,
+            success=True,
+        )
+
+    top_cols = list(result.columns)
+
+    # Forward fill top headers across Unnamed: columns
+    filled_top: list[str] = []
+    curr = top_cols[0]
+    for c in top_cols:
+        if c.startswith("Unnamed:") or c.strip() == "":
+            filled_top.append(curr)
+        else:
+            curr = c
+            filled_top.append(c)
+
+    # Check row 0 sub-headers
+    row0_vals = list(result.iloc[0])
+    has_subheaders = any(pd.notna(v) and str(v).strip() != "" for v in row0_vals)
+
+    # Extract ID columns (e.g. Segment >>, First column if unique)
+    id_col = top_cols[0] if not top_cols[0].startswith("Unnamed:") else "ID"
+
+    # Identify category groups from filled top headers
+    kw_subtotals = ["total", "subtotal", "summary", "grand total"]
+    
+    # Filter out pure subtotal columns
+    valid_col_indices = [
+        i for i, c in enumerate(top_cols)
+        if not any(kw in c.lower() for kw in kw_subtotals)
+        and not any(kw in str(row0_vals[i]).lower() for kw in kw_subtotals)
+    ]
+
+    # Combine top header and row 0 subheader
+    combined_names: list[str] = []
+    for i in range(cols_before):
+        t = filled_top[i].strip()
+        sub = str(row0_vals[i]).strip() if i < len(row0_vals) and pd.notna(row0_vals[i]) else ""
+        
+        # Clean up 'Segment >>' or similar prefix
+        t_clean = re.sub(r"[>\:\;]+", "", t).strip()
+        
+        if sub and sub.lower() != t_clean.lower() and not sub.startswith("Unnamed:"):
+            combined_names.append(f"{t_clean}__{sub}")
+        else:
+            combined_names.append(t_clean)
+
+    result.columns = pd.Index(combined_names)
+
+    # Drop row 0 if it was used as subheader
+    if has_subheaders:
+        result = result.iloc[1:].reset_index(drop=True)
+
+    # Drop pure subtotal columns
+    cols_to_keep = [combined_names[i] for i in valid_col_indices if i < len(combined_names)]
+    result = result[[c for c in cols_to_keep if c in result.columns]]
+
+    # Ensure unique column names
+    seen: dict[str, int] = {}
+    final_cols: list[str] = []
+    for col in result.columns:
+        clean_c = col.strip()
+        if clean_c in seen:
+            seen[clean_c] += 1
+            final_cols.append(f"{clean_c}_{seen[clean_c]}")
+        else:
+            seen[clean_c] = 0
+            final_cols.append(clean_c)
+
+    result.columns = pd.Index(final_cols)
+
+    rows_after = len(result)
+    cols_after = len(result.columns)
+    total_cells = rows_before * cols_before
+    retained_cells = rows_after * cols_after
+    discarded_cells = total_cells - retained_cells
+
+    logger.info("Unpivoted horizontal category blocks: {}x{} -> {}x{}", rows_before, cols_before, rows_after, cols_after)
+
+    record = RepairRecord(
+        operation="unpivot_horizontal_category_blocks",
+        timestamp=datetime.now(),
+        rows_before=rows_before,
+        rows_after=rows_after,
+        columns_before=cols_before,
+        columns_after=cols_after,
+        success=True,
+        details={
+            "source_cells_considered": total_cells,
+            "source_cells_retained": retained_cells,
+            "source_cells_discarded": discarded_cells,
+            "discarded_reasons": {"unpivoted_redundant_subtotals": discarded_cells},
+            "new_columns": final_cols,
+        },
+    )
+
+    return result, record
+
+
+def auto_reconstruct_structure(df: pd.DataFrame) -> tuple[pd.DataFrame, list[RepairRecord]]:
+    """Automatically reconstruct dataset structure using safe deterministic plan.
+
+    Args:
+        df: Source DataFrame (never modified).
+
+    Returns:
+        Tuple of (repaired DataFrame copy, list of RepairRecord).
+    """
+    from services.structure.planner import StructuralPlanner
+
+    plan = StructuralPlanner.create_plan(df)
+    records: list[RepairRecord] = []
+    current_df = df.copy()
+
+    # Safety check: automatic execution is allowed ONLY when confidence >= 0.85, no ambiguities exist, and approval is not required
+    if plan.requires_human_approval or plan.confidence < 0.85 or len(plan.ambiguity_flags) > 0:
+        logger.info("Structural reconstruction blocked automatic execution due to safety controls (confidence: {:.2f}, approval_required: {}, ambiguities: {})", plan.confidence, plan.requires_human_approval, len(plan.ambiguity_flags))
+        return current_df, records
+
+    if plan.proposed_transformation == "remove_spacer_rows_cols":
+        current_df, rec = remove_spacer_rows_cols(current_df)
+        records.append(rec)
+    elif plan.proposed_transformation == "flatten_multi_headers":
+        current_df, rec = flatten_headers(current_df, header_rows=1)
+        records.append(rec)
+    elif plan.proposed_transformation == "unpivot_horizontal_category_blocks":
+        current_df, rec = unpivot_horizontal_category_blocks(current_df)
+        records.append(rec)
+    elif plan.proposed_transformation == "remove_subtotal_elements":
+        current_df, rec = remove_subtotal_elements(current_df)
+        records.append(rec)
+    elif plan.proposed_transformation == "reconstruct_embedded_records":
+        current_df, rec = reconstruct_embedded_records(current_df)
+        records.append(rec)
+
+    return current_df, records
+
+
+def reconstruct_embedded_records(
+    df: pd.DataFrame, field_labels: Optional[list[str]] = None
+) -> tuple[pd.DataFrame, RepairRecord]:
+    """Reconstruct embedded text records into a multi-column DataFrame.
+
+    Args:
+        df: Source DataFrame (not modified).
+        field_labels: Optional explicit list of field labels.
+
+    Returns:
+        Tuple of (reconstructed DataFrame, RepairRecord).
+    """
+    from services.structure.embedded_records import EmbeddedRecordAnalyzer
+
+    rows_before = len(df)
+    cols_before = len(df.columns)
+
+    reconstructed_df, audit_info = EmbeddedRecordAnalyzer.reconstruct_dataframe(df, custom_labels=field_labels)
+
+    rows_after = len(reconstructed_df)
+    cols_after = len(reconstructed_df.columns)
+
+    record = RepairRecord(
+        operation="reconstruct_embedded_records",
+        timestamp=datetime.now(),
+        rows_before=rows_before,
+        rows_after=rows_after,
+        columns_before=cols_before,
+        columns_after=cols_after,
+        success=audit_info.get("success", True),
+        warnings=audit_info.get("ambiguity_flags", []),
+        details={
+            "discovered_labels": audit_info.get("labels", []),
+            "confidence": audit_info.get("confidence", 0.0),
+            "source_shape": audit_info.get("source_shape", (rows_before, cols_before)),
+            "target_shape": audit_info.get("target_shape", (rows_after, cols_after)),
+            "source_cells_considered": audit_info.get("source_cells_considered", rows_before * cols_before),
+            "source_cells_retained": audit_info.get("source_cells_retained", rows_after * cols_after),
+            "source_cells_discarded": audit_info.get("source_cells_discarded", 0),
+        },
+    )
+
+    return reconstructed_df, record
+
+

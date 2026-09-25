@@ -16,23 +16,26 @@ from utils.dataframe import safe_numeric_columns
 
 
 def detect_impossible_values(df: pd.DataFrame) -> dict[str, list[dict[str, Any]]]:
-    """Detect logically impossible values based on column context and semantic boundaries.
+    """Detect logically impossible values based on empirical data distribution and semantic boundaries.
 
-    Checks:
-    - Negative values in columns that are logically non-negative (age, count, quantity, duration).
-    - Percentages > 100% or < 0% when marked as bound percentages.
-    - Non-finite numbers (inf, -inf) in numeric series.
+    100% Column-Name Agnostic:
+    - Infinite numbers (inf / -inf) in any numeric series.
+    - Empirical Non-Negativity: When >= 90% of non-null values are non-negative (>= 0) and isolated negative values exist.
+    - Empirical Percentage/Ratio Boundary: When >= 90% of non-null values are in [0, 100] and isolated values exceed 100.
     """
     issues_by_col: dict[str, list[dict[str, Any]]] = {}
 
     for col in df.columns:
         series = df[col]
-        col_lower = str(col).lower()
         col_issues: list[dict[str, Any]] = []
 
         if pd.api.types.is_numeric_dtype(series):
-            # Check non-finite
-            inf_count = int(np.isinf(series).sum())
+            clean_series = series.dropna()
+            if len(clean_series) == 0:
+                continue
+
+            # 1. Non-finite check (inf / -inf)
+            inf_count = int(np.isinf(clean_series).sum())
             if inf_count > 0:
                 col_issues.append({
                     "issue_type": IssueTaxonomy.IMPOSSIBLE_VALUE.value,
@@ -41,29 +44,30 @@ def detect_impossible_values(df: pd.DataFrame) -> dict[str, list[dict[str, Any]]
                     "severity": "critical",
                 })
 
-            # Check strictly non-negative domains
-            non_negative_keywords = ["age", "count", "qty", "quantity", "duration", "tenure", "year_built", "num_"]
-            if any(k in col_lower for k in non_negative_keywords):
-                neg_mask = series < 0
-                neg_count = int(neg_mask.sum())
-                if neg_count > 0:
-                    samples = series[neg_mask].head(3).tolist()
+            # 2. Empirical Non-Negativity Check (Data-driven distribution)
+            fin_series = clean_series[~np.isinf(clean_series)]
+            if len(fin_series) > 0:
+                non_neg_count = int((fin_series >= 0).sum())
+                neg_count = int((fin_series < 0).sum())
+                non_neg_ratio = non_neg_count / len(fin_series)
+
+                if neg_count > 0 and non_neg_ratio >= 0.70:
+                    samples = fin_series[fin_series < 0].head(3).tolist()
                     col_issues.append({
                         "issue_type": IssueTaxonomy.IMPOSSIBLE_VALUE.value,
-                        "reason": f"Impossible negative values in non-negative column '{col}' ({neg_count} rows, samples: {samples})",
+                        "reason": f"Impossible negative value(s) in empirically non-negative column '{col}' ({neg_count} rows, samples: {samples})",
                         "count": neg_count,
                         "severity": "high",
                     })
 
-            # Check percentages
-            pct_keywords = ["percent", "pct", "rate", "%"]
-            if any(k in col_lower for k in pct_keywords):
-                # If values are on 0-100 scale
-                if (series.dropna() > 100.0).any():
-                    over_100_count = int((series > 100.0).sum())
+            # 3. Empirical Percentage / Ratio Boundary Check (Data-driven distribution)
+            if len(fin_series) > 0 and (fin_series >= 0).all():
+                in_bound_count = int((fin_series <= 100.0).sum())
+                over_100_count = int((fin_series > 100.0).sum())
+                if over_100_count > 0 and (in_bound_count / len(fin_series)) >= 0.70:
                     col_issues.append({
                         "issue_type": IssueTaxonomy.IMPOSSIBLE_VALUE.value,
-                        "reason": f"Percentage values exceed 100% ({over_100_count} rows)",
+                        "reason": f"Value(s) exceed 100% boundary in empirically bounded column '{col}' ({over_100_count} rows)",
                         "count": over_100_count,
                         "severity": "medium",
                     })

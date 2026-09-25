@@ -27,6 +27,15 @@ class RepairOperation(str, Enum):
     EXPLODE_MULTI_VALUE_CELLS = "explode_multi_value_cells"
     REMOVE_REPEATED_HEADERS = "remove_repeated_headers"
     REMOVE_METADATA_ROWS = "remove_metadata_rows"
+    REMOVE_SPACER_ROWS_COLS = "remove_spacer_rows_cols"
+    UNPIVOT_HORIZONTAL_CATEGORY_BLOCKS = "unpivot_horizontal_category_blocks"
+    REMOVE_SUBTOTAL_ELEMENTS = "remove_subtotal_elements"
+    AUTO_RECONSTRUCT_STRUCTURE = "auto_reconstruct_structure"
+    RECONSTRUCT_EMBEDDED_RECORDS = "reconstruct_embedded_records"
+    REMOVE_ROWS = "remove_rows"
+    REMOVE_COLUMNS = "remove_columns"
+    REMOVE_ROWS_AND_COLUMNS = "remove_rows_and_columns"
+    REPLACE_VALUES = "replace_values"
 
 
 class IssueTaxonomy(str, Enum):

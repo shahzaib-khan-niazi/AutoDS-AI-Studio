@@ -126,6 +126,10 @@ def format_date_series(
     return series
 
 
+# Alias for backwards compatibility / alternate test imports
+format_datetime_series_for_display = format_date_series
+
+
 # Common month names pattern across languages/formats
 MONTH_NAMES_PATTERN = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)"
 

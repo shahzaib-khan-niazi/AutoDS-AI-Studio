@@ -35,6 +35,7 @@ from models.repair import (
     TypeInferenceResult,
 )
 from services.repair.dates import analyze_date_column
+from utils.number_parser import parse_written_number, parse_magnitude_abbreviation
 
 
 PARSE_THRESHOLD = 0.85
@@ -51,10 +52,10 @@ CURRENCY_SYMBOLS = ["$", "€", "£", "¥", "₹", "₩", "₺", "₪", "฿", "
 def _is_identifier_column(series: pd.Series) -> bool:
     """Check if a series is an identifier/code and should NOT be converted to numeric.
 
-    Catches:
+    100% Data-Driven & Column-Name Agnostic:
     1. Zero-padded numeric strings (e.g. '00123', '00045', zip codes '01234')
-    2. Column names containing identifier keywords (id, code, ref, key, sku, zip, postal, account, num)
-    3. Alphanumeric / hyphenated patterns (e.g. 'INV-001', 'CA-2011-167199', 'CUST_99')
+    2. Alphanumeric / hyphenated patterns (e.g. 'INV-001', 'CA-2011-167199', 'CUST_99')
+    3. High uniqueness (>85%) with structured discrete string keys
     """
     non_null = series.dropna().astype(str).str.strip()
     if len(non_null) == 0:
@@ -79,15 +80,7 @@ def _is_identifier_column(series: pd.Series) -> bool:
     if has_leading_zeros:
         return True
 
-    # 2. Check column name hints
-    col_name = str(series.name).lower() if series.name else ""
-    id_tokens = ["id", "code", "sku", "ref", "key", "zip", "postal", "account", "invoice", "order_id", "cust_id", "phone"]
-    is_named_id = any(
-        tok == col_name or f"_{tok}" in col_name or f"{tok}_" in col_name or col_name.endswith(tok)
-        for tok in id_tokens
-    )
-
-    # 3. Check for alphanumeric hyphenated/underscore codes (e.g. 'INV-001', 'CA-2011-167199') with at least one letter
+    # 2. Check for alphanumeric hyphenated/underscore codes (e.g. 'INV-001', 'CA-2011-167199') with at least one letter
     has_code_pattern = any(
         re.match(r"^[A-Za-z0-9]+[-_][A-Za-z0-9-_]+$", v) and any(c.isalpha() for c in v)
         for v in sample_100[:50]
@@ -95,31 +88,29 @@ def _is_identifier_column(series: pd.Series) -> bool:
     if has_code_pattern:
         return True
 
-    # 4. If column name explicitly indicates an ID/Code and has high uniqueness
-    if is_named_id and (series.nunique() / max(len(series), 1)) >= 0.7:
-        return True
+    # 3. High uniqueness (>85%) with non-numeric structured string tokens (excluding currency values & multi-word prose)
+    unique_ratio = series.nunique() / max(len(series), 1)
+    if unique_ratio >= 0.85:
+        avg_spaces = sum(v.count(" ") for v in sample_100[:20]) / max(len(sample_100[:20]), 1)
+        if avg_spaces >= 2:
+            return False  # Multi-word prose, not a short discrete identifier key
+        has_currency = any(any(sym in v.lower() for sym in CURRENCY_SYMBOLS) for v in sample_100[:20])
+        if not has_currency:
+            has_alpha = any(any(c.isalpha() for c in v) for v in sample_100[:20])
+            if has_alpha:
+                return True
 
     return False
 
 
 def _is_boolean_column(series: pd.Series) -> bool:
-    """Check if a series contains strictly boolean-like string values."""
+    """Check if a series contains strictly boolean-like values based on empirical value set."""
     non_null = series.dropna()
     if len(non_null) == 0:
         return False
 
     lowered = non_null.astype(str).str.strip().str.lower()
-    all_bool = lowered.isin(ALL_BOOL_VALUES)
-
-    # Avoid converting pure 0/1 numeric sequences unless explicit boolean hint or only two distinct values with hint
-    unique_vals = set(lowered.unique())
-    if unique_vals.issubset({"0", "1"}) and len(unique_vals) <= 2:
-        col_name = str(series.name).lower() if series.name else ""
-        has_bool_hint = any(k in col_name for k in ["is_", "has_", "flag", "active", "enabled", "selected", "bool"])
-        if not has_bool_hint:
-            return False
-
-    return bool(all_bool.all())
+    return bool(lowered.isin(ALL_BOOL_VALUES).all())
 
 
 def _convert_bool_series(series: pd.Series) -> pd.Series:
@@ -143,6 +134,16 @@ def parse_numeric_value(raw: Any) -> Optional[float]:
     s = str(raw).strip()
     if not s:
         return None
+
+    # 1. Try magnitude abbreviation parsing (e.g. 50K, 1.5M, $50K, 2B PKR)
+    mag_val = parse_magnitude_abbreviation(s)
+    if mag_val is not None:
+        return mag_val
+
+    # 2. Try written natural language number parsing (e.g. "one hundred", "twenty five thousand", "two million")
+    written_val = parse_written_number(s)
+    if written_val is not None:
+        return written_val
 
     is_negative = False
 
@@ -171,29 +172,29 @@ def parse_numeric_value(raw: Any) -> Optional[float]:
         s = s[:-1].strip()
 
     # Strip non-numeric tokens except digits, comma, dot
-    s = re.sub(r"[^\d.,]", "", s)
-    if not s:
+    cleaned_num = re.sub(r"[^\d.,]", "", s)
+    if not cleaned_num:
         return None
 
     # Handle comma and dot locale separators
-    if "," in s and "." in s:
-        first_comma = s.find(",")
-        first_dot = s.find(".")
+    if "," in cleaned_num and "." in cleaned_num:
+        first_comma = cleaned_num.find(",")
+        first_dot = cleaned_num.find(".")
         if first_comma < first_dot:
             # 1,234.56 -> comma is thousands, dot is decimal
-            s = s.replace(",", "")
+            cleaned_num = cleaned_num.replace(",", "")
         else:
             # 1.234,56 -> dot is thousands, comma is decimal
-            s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        parts = s.split(",")
+            cleaned_num = cleaned_num.replace(".", "").replace(",", ".")
+    elif "," in cleaned_num:
+        parts = cleaned_num.split(",")
         if len(parts) == 2 and len(parts[1]) != 3:
-            s = s.replace(",", ".")
+            cleaned_num = cleaned_num.replace(",", ".")
         else:
-            s = s.replace(",", "")
+            cleaned_num = cleaned_num.replace(",", "")
 
     try:
-        val = float(s)
+        val = float(cleaned_num)
         return -val if is_negative else val
     except (ValueError, TypeError):
         return None

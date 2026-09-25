@@ -38,9 +38,14 @@ def evaluate_all_rules(df: pd.DataFrame) -> list[RuleEvidence]:
         _rule_pivot_table,
         _rule_crosstab,
         _rule_multi_header,
+        _rule_repeated_category_blocks,
+        _rule_spacer_artifacts,
+        _rule_subtotal_columns_rows,
+        _rule_metadata_banners,
         _rule_time_series,
         _rule_survey,
         _rule_transactional,
+        _rule_embedded_structured_records,
     ]
 
     results: list[RuleEvidence] = []
@@ -653,3 +658,190 @@ def _rule_transactional(df: pd.DataFrame) -> RuleEvidence:
         evidence=evidence,
         reason="Dataset appears to contain transactional/sales data",
     )
+
+
+def _rule_repeated_category_blocks(df: pd.DataFrame) -> RuleEvidence:
+    """Detect horizontally distributed repeated category blocks.
+
+    Signals:
+    - Top headers or row 0 contain category labels repeated alongside sub-metrics
+    - Column names contain patterns like 'Category Total', 'Category - Metric', or repeating sub-header names
+    - Unnamed columns stemming from merged cells above repeating sub-blocks
+    """
+    evidence: list[str] = []
+    score = 0.0
+    cols = [str(c) for c in df.columns]
+
+    # Check for recurring "Total" or category headers in column names
+    total_cols = [c for c in cols if any(kw in c.lower() for kw in ["total", "subtotal", "sum", "grand total"])]
+    unnamed_cols = [c for c in cols if c.startswith("Unnamed:") or c.strip() == ""]
+
+    if len(total_cols) >= 2:
+        score += 0.35
+        evidence.append(f"Contains {len(total_cols)} repeated category total/subtotal columns")
+
+    if len(unnamed_cols) >= 2 and len(total_cols) >= 1:
+        score += 0.25
+        evidence.append(f"Contains {len(unnamed_cols)} unnamed artifact columns from merged top-level headers")
+
+    # Check if row 0 contains repeating sub-headers across blocks
+    if len(df) > 0:
+        row0_vals = [str(v).strip().lower() for v in df.iloc[0] if pd.notna(v)]
+        if len(row0_vals) > 0:
+            val_counts = pd.Series(row0_vals).value_counts()
+            repeats = val_counts[val_counts >= 2]
+            if len(repeats) >= 1:
+                score += 0.3
+                evidence.append(f"Row 0 contains repeating metric sub-headers: {', '.join(repeats.index[:3])}")
+
+    score = min(1.0, score)
+
+    return RuleEvidence(
+        rule_name="repeated_category_blocks",
+        structure_type=StructureType.REPEATED_CATEGORY_BLOCKS,
+        score=score,
+        evidence=evidence,
+        reason="Dataset appears to contain horizontally repeated category blocks with subtotal columns",
+    )
+
+
+def _rule_spacer_artifacts(df: pd.DataFrame) -> RuleEvidence:
+    """Detect empty spacer rows and columns.
+
+    Signals:
+    - Completely empty columns or rows
+    - Columns with >90% nulls acting as visual separators
+    """
+    evidence: list[str] = []
+    score = 0.0
+
+    empty_cols = [str(c) for c in df.columns if df[c].isna().all()]
+    sparse_cols = [str(c) for c in df.columns if df[c].isna().mean() > 0.90 and str(c).startswith("Unnamed:")]
+
+    if empty_cols:
+        score += 0.4
+        evidence.append(f"{len(empty_cols)} completely empty spacer column(s)")
+
+    if sparse_cols:
+        score += 0.3
+        evidence.append(f"{len(sparse_cols)} sparse spacer column(s) (>90% empty)")
+
+    empty_rows = df.isna().all(axis=1).sum()
+    if empty_rows > 0:
+        score += 0.25
+        evidence.append(f"{empty_rows} empty spacer row(s)")
+
+    score = min(1.0, score)
+
+    return RuleEvidence(
+        rule_name="spacer_artifacts",
+        structure_type=StructureType.SPACER_ARTIFACTS,
+        score=score,
+        evidence=evidence,
+        reason="Dataset contains blank spacer rows or columns",
+    )
+
+
+def _rule_subtotal_columns_rows(df: pd.DataFrame) -> RuleEvidence:
+    """Detect total/subtotal columns or summary rows mixed into data.
+
+    Signals:
+    - Columns or rows explicitly labeled Total, Subtotal, Summary, Average
+    """
+    evidence: list[str] = []
+    score = 0.0
+
+    kw_list = ["total", "subtotal", "summary", "average", "grand total"]
+
+    subtotal_cols = [str(c) for c in df.columns if any(kw in str(c).lower() for kw in kw_list)]
+    if subtotal_cols:
+        score += 0.4
+        evidence.append(f"Contains {len(subtotal_cols)} subtotal/total column(s): {', '.join(subtotal_cols[:3])}")
+
+    # Check rows
+    if len(df) > 0 and len(df.columns) > 0:
+        first_col_str = df.iloc[:, 0].dropna().astype(str).str.lower()
+        subtotal_rows = first_col_str[first_col_str.str.contains("|".join(kw_list), regex=True)].count()
+        if subtotal_rows > 0:
+            score += 0.4
+            evidence.append(f"Contains {subtotal_rows} summary/subtotal row(s) in first column")
+
+    score = min(1.0, score)
+
+    return RuleEvidence(
+        rule_name="subtotal_columns_rows",
+        structure_type=StructureType.SUBTOTAL_COLUMNS_ROWS,
+        score=score,
+        evidence=evidence,
+        reason="Dataset contains summary, total, or subtotal columns/rows",
+    )
+
+
+def _rule_metadata_banners(df: pd.DataFrame) -> RuleEvidence:
+    """Detect metadata/report header banners at dataset boundaries.
+
+    Signals:
+    - First 1-3 rows have single non-null text value while rest of cells in row are null
+    - Report title, timestamp, author notes, or disclaimer text
+    """
+    evidence: list[str] = []
+    score = 0.0
+
+    if len(df.columns) >= 2 and len(df) > 2:
+        for r_idx in range(min(3, len(df))):
+            row = df.iloc[r_idx]
+            non_nulls = row.dropna()
+            if len(non_nulls) == 1 and isinstance(non_nulls.iloc[0], str):
+                text = str(non_nulls.iloc[0]).strip()
+                if len(text) > 5 and not text.isdigit():
+                    score += 0.35
+                    evidence.append(f"Row {r_idx} contains a single text banner cell: '{text[:30]}...'")
+
+    score = min(1.0, score)
+
+    return RuleEvidence(
+        rule_name="metadata_banners",
+        structure_type=StructureType.METADATA_BANNERS,
+        score=score,
+        evidence=evidence,
+        reason="Dataset contains top/bottom metadata banner rows",
+    )
+
+
+def _rule_embedded_structured_records(df: pd.DataFrame) -> RuleEvidence:
+    """Detect embedded structured records inside text cells (single-column or narrow layout).
+
+    Key signals:
+    - Single-column or narrow table layout (1-2 columns)
+    - High average string length
+    - Cross-row statistical evidence of repeating field labels and key-value patterns
+    - Distinction from natural language prose / free-form text comments
+    """
+    from services.structure.embedded_records import EmbeddedRecordAnalyzer
+
+    evidence: list[str] = []
+    score = 0.0
+
+    profile = EmbeddedRecordAnalyzer.profile_dataset(df)
+
+    labels = profile.get("candidate_field_labels", [])
+    confidence = profile.get("confidence", 0.0)
+    consistency = profile.get("consistency_of_inferred_structure", 0.0)
+    ambiguity_flags = profile.get("ambiguity_flags", [])
+
+    if labels and len(labels) >= 2 and confidence >= 0.50:
+        score = confidence
+        evidence.append(f"Discovered {len(labels)} candidate field label(s): {', '.join(labels[:5])}")
+        evidence.append(f"Cross-row structural consistency: {consistency:.0%}")
+        if ambiguity_flags:
+            evidence.extend(ambiguity_flags)
+
+    return RuleEvidence(
+        rule_name="embedded_structured_records",
+        structure_type=StructureType.EMBEDDED_STRUCTURED_RECORDS,
+        score=score,
+        evidence=evidence,
+        reason=f"Dataset contains embedded structured records with discovered fields: {', '.join(labels[:4]) if labels else 'None'}",
+    )
+
+

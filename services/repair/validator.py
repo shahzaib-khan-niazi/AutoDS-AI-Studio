@@ -93,7 +93,7 @@ def validate_repair(
             elif operation in non_null_loss_ops and new_nulls > orig_nulls:
                 lost_values = new_nulls - orig_nulls
                 loss_ratio = lost_values / max(len(original_df) - orig_nulls, 1)
-                if loss_ratio > 0.15:
+                if loss_ratio > 0.15 and operation != "convert_types":
                     errors.append(
                         f"Data loss rejected: '{col_str}' lost {lost_values} non-null values ({loss_ratio:.1%}) during {operation}"
                     )

@@ -6,7 +6,7 @@ DOES NOT clean or modify the data during loading.
 """
 
 import os
-from typing import BinaryIO
+from typing import Any, BinaryIO, Optional
 import pandas as pd
 
 from core.exceptions import DatasetLoadError, DatasetValidationError
@@ -66,7 +66,7 @@ class UploadService:
         cls._validate_dataframe(df, filename)
 
         # Create metadata
-        metadata = cls._create_metadata(df, filename)
+        metadata = cls._create_metadata(df, filename, file=file)
 
         # Archive the original file
         cls._archive_file(file, filename)
@@ -146,13 +146,39 @@ class UploadService:
                 details=f"File: {filename}",
             )
 
-    @staticmethod
-    def _create_metadata(df: pd.DataFrame, filename: str) -> DatasetMetadata:
+    @classmethod
+    def _extract_excel_metadata(cls, file: BinaryIO) -> tuple[list[str], dict[str, Any]]:
+        """Extract merged cell ranges and sheet metadata using openpyxl if available."""
+        merged_cells: list[str] = []
+        sheet_meta: dict[str, Any] = {}
+        try:
+            file.seek(0)
+            import openpyxl
+            wb = openpyxl.load_workbook(file, data_only=True, read_only=False)
+            sheet = wb.active
+            if sheet is not None:
+                sheet_meta["title"] = sheet.title
+                sheet_meta["max_row"] = sheet.max_row
+                sheet_meta["max_column"] = sheet.max_column
+                if hasattr(sheet, "merged_cells") and sheet.merged_cells:
+                    merged_cells = [str(r) for r in sheet.merged_cells.ranges]
+            file.seek(0)
+        except Exception as e:
+            logger.debug("Merged cell extraction skipped: {}", str(e))
+            try:
+                file.seek(0)
+            except Exception:
+                pass
+        return merged_cells, sheet_meta
+
+    @classmethod
+    def _create_metadata(cls, df: pd.DataFrame, filename: str, file: Optional[BinaryIO] = None) -> DatasetMetadata:
         """Create metadata from a loaded DataFrame.
 
         Args:
             df: Loaded DataFrame.
             filename: Original filename.
+            file: Optional file handle.
 
         Returns:
             DatasetMetadata instance.
@@ -162,6 +188,12 @@ class UploadService:
         for col in df.columns:
             dtypes_dict[str(col)] = str(df[col].dtype)
 
+        merged_cells: list[str] = []
+        sheet_meta: dict[str, Any] = {}
+        ext = get_file_extension(filename)
+        if file is not None and ext in (".xlsx", ".xls"):
+            merged_cells, sheet_meta = cls._extract_excel_metadata(file)
+
         return DatasetMetadata(
             filename=filename,
             rows=len(df),
@@ -169,6 +201,8 @@ class UploadService:
             memory_usage_bytes=memory_bytes,
             column_names=[str(c) for c in df.columns],
             dtypes=dtypes_dict,
+            merged_cells=merged_cells,
+            sheet_metadata=sheet_meta,
         )
 
     @classmethod

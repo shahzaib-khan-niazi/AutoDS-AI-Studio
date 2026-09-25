@@ -215,7 +215,9 @@ def fill_missing(
 
         strat = strategy
         if strat == "auto":
-            if _is_identifier_column(result[col]):
+            null_ratio = (len(result[col]) - len(non_null)) / len(result[col])
+            if _is_identifier_column(result[col]) or null_ratio >= 0.50 or len(non_null) < 3:
+                # High missingness or identifier: skip automatic imputation to preserve cells as pd.NA / Unavailable
                 continue
             elif col in numeric_cols:
                 strat = "median"

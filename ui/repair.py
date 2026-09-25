@@ -40,6 +40,8 @@ from services.repair.columns import (
 
 from services.pipeline.autonomous import AutonomousPipelineService, AutonomousPipelineResult
 from services.ai.planner import AIPlanner
+from services.repair.export import ExportService
+from services.structure.planner import StructuralPlanner
 from ui.theme import render_page_header, render_metric_card, render_section_header, render_empty_state
 from utils.dataframe import make_arrow_safe_preview, safe_numeric_columns
 from utils.formatting import format_number
@@ -242,13 +244,15 @@ def show_repair() -> None:
 
     # ── HERO FEATURE 4: 🛠️ Granular Repair & Imputation Tools ──
     render_section_header("Granular Repair & Imputation Tools", icon="🛠️")
-    tab_norm, tab_clean, tab_impute, tab_types, tab_struct, tab_rename, tab_reset = st.tabs([
+    tab_norm, tab_clean, tab_impute, tab_types, tab_struct, tab_rename, tab_remove, tab_replace, tab_reset = st.tabs([
         "🔤 Categorical Normalization",
         "🧹 Basic Cleaning",
         "🩹 Missing Value Imputation",
         "🔢 Type Conversion & Outliers",
         "📐 Reshape / Structural",
         "🏷️ Rename Column",
+        "🗑️ Remove Rows & Columns",
+        "🔄 Replace Values",
         "🔄 Reset",
     ])
 
@@ -456,18 +460,59 @@ def show_repair() -> None:
                 st.rerun()
 
             st.markdown("---")
-            st.markdown("##### Manual Type Conversion")
+            st.markdown("##### 🔢 Explicit Numeric Conversion")
+            st.caption("Explicitly convert any column to a numeric dtype (Int64/Float64), resolving formatted numbers, written numbers ('ten', 'five'), and encoding non-numeric categorical text.")
+
             numeric_target = st.multiselect(
-                "Select columns to convert to Numeric:",
+                "Select column(s) to convert to Numeric:",
                 options=list(df.columns),
                 key="num_conv_target",
             )
-            if st.button("Convert to Numeric", disabled=len(numeric_target) == 0):
+
+            if numeric_target:
+                from services.repair.types import convert_series_to_numeric_explicit
+
+                for num_col in numeric_target:
+                    conv_s, metrics = convert_series_to_numeric_explicit(df[num_col])
+
+                    st.markdown(
+                        f"""
+                        <div style="background-color: #1E293B; border: 2px solid #3B82F6; border-radius: 8px; padding: 16px; margin: 12px 0;">
+                            <div style="font-size: 0.85rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+                                Explicit Conversion Preview — <code>{num_col}</code>
+                            </div>
+                            <div style="font-size: 1rem; color: #F8FAFC; margin-bottom: 8px;">
+                                Original Dtype: <strong><code>{metrics['original_dtype']}</code></strong> &nbsp;→&nbsp; Target Dtype: <strong><code>{metrics['final_dtype']}</code></strong>
+                            </div>
+                            <div style="color: #94A3B8; font-size: 0.85rem; line-height: 1.6;">
+                                • Already numeric: <strong>{metrics['already_numeric']}</strong><br/>
+                                • Numeric strings: <strong>{metrics['numeric_strings']}</strong><br/>
+                                • Formatted numeric values: <strong>{metrics['formatted_numeric_values']}</strong><br/>
+                                • Written numbers (e.g. 'ten', 'five'): <strong>{metrics['written_numbers']}</strong><br/>
+                                • Unparseable text values set to pd.NA: <strong>{metrics.get('unparseable_text_to_na', 0)}</strong><br/>
+                                • Total unavailable values (pd.NA): <strong>{metrics['unavailable_values']}</strong>
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    if metrics.get("unparseable_text_to_na", 0) > 0:
+                        st.info("ℹ️ **Notice:** Values that could not be interpreted as numbers were set to `pd.NA` rather than assigned arbitrary numeric codes.")
+
+                    preview_diff_df = pd.DataFrame({
+                        "BEFORE": df[num_col].head(10).astype(str),
+                        "AFTER": conv_s.head(10).astype(str),
+                    })
+                    st.markdown(f"**Sample Before → After (`{num_col}`):**")
+                    st.dataframe(preview_diff_df, use_container_width=True, hide_index=True)
+
+            if st.button("🔢 Apply Explicit Numeric Conversion", type="primary", disabled=len(numeric_target) == 0, key="btn_apply_explicit_numeric"):
                 action = RepairAction(
                     operation=RepairOperation.CONVERT_TYPES,
                     target=numeric_target,
                     parameters={"target_type": "numeric"},
-                    reason=f"Convert {len(numeric_target)} column(s) to numeric",
+                    reason=f"Explicitly converted {len(numeric_target)} column(s) to numeric",
                 )
                 _apply_repairs(df, [action])
                 st.rerun()
@@ -695,6 +740,138 @@ def show_repair() -> None:
                 st.rerun()
 
     with tab_struct:
+        st.markdown("##### 📐 Deterministic Structural Repair & Reconstruction Preview")
+        st.caption("Inspect inferred structural issues, proposed target schema, affected rows/cols, audit cell lineage metrics, and apply or rollback transformations safely.")
+
+        # Rollback support
+        if "prev_structural_snapshot" in st.session_state and st.session_state["prev_structural_snapshot"] is not None:
+            if st.button("⏪ Rollback Last Structural Repair", key="btn_rollback_struct"):
+                update_dataset(st.session_state["prev_structural_snapshot"])
+                st.session_state["prev_structural_snapshot"] = None
+                st.toast("⏪ Rolled back to dataset version before latest structural repair.")
+                st.rerun()
+
+        # Structural Planner Audit & Preview
+        struct_plan = StructuralPlanner.create_plan(df)
+        if struct_plan and struct_plan.detected_issue != "STANDARD_TABULAR":
+            st.markdown("#### 🔬 Structural Diagnosis")
+
+            # 1. Detected Structure
+            col_d1, col_d2 = st.columns([1, 1])
+            with col_d1:
+                st.markdown(f"**Structure Type:** `{struct_plan.detected_issue}`")
+                st.markdown(f"**Confidence:** `{struct_plan.confidence:.0%}`")
+                st.markdown(f"**Proposed Transformation:** `{struct_plan.proposed_transformation}`")
+            with col_d2:
+                if struct_plan.evidence:
+                    st.markdown("**Evidence:**")
+                    for ev in struct_plan.evidence:
+                        st.markdown(f"• {ev}")
+
+            if struct_plan.ambiguity_flags:
+                st.markdown("**Ambiguities:**")
+                for amb in struct_plan.ambiguity_flags:
+                    st.warning(f"⚠️ {amb}")
+
+            # Low Confidence Warning Banner
+            if struct_plan.requires_human_approval or struct_plan.confidence < 0.85 or struct_plan.ambiguity_flags:
+                st.error("⚠️ Manual Review Required: Structural reconstruction requires explicit human approval due to low confidence or potential ambiguity.")
+
+            st.divider()
+
+            # 2. Proposed Schema
+            if struct_plan.target_schema:
+                st.markdown("#### 📋 Proposed Schema")
+                schema_df = pd.DataFrame([
+                    {"Column": col, "Inferred Dtype": dtype_val}
+                    for col, dtype_val in struct_plan.target_schema.items()
+                ])
+                st.dataframe(schema_df, use_container_width=True, hide_index=True)
+
+            # 3. Before Preview & 4. After Preview
+            col_prev1, col_prev2 = st.columns(2)
+            with col_prev1:
+                st.markdown("#### 📥 Before Preview (Sample Input)")
+                sample_before = struct_plan.before_after_sample.get("before", [])
+                if sample_before:
+                    st.dataframe(pd.DataFrame(sample_before), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No before preview available.")
+
+            with col_prev2:
+                st.markdown("#### 📤 After Preview (Sample Output)")
+                sample_after = struct_plan.before_after_sample.get("after", [])
+                if sample_after:
+                    st.dataframe(pd.DataFrame(sample_after), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No after preview available.")
+
+            # 5. Validation
+            st.markdown("#### 🛡️ Validation & Audit Metrics")
+            if struct_plan.audit:
+                aud = struct_plan.audit
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    render_metric_card("Shape", f"{aud.source_shape[0]}×{aud.source_shape[1]} → {aud.target_shape[0]}×{aud.target_shape[1]}", icon="📐")
+                with m2:
+                    render_metric_card("Cells Considered", str(aud.source_cells_considered), icon="📊")
+                with m3:
+                    render_metric_card("Cells Retained", str(aud.source_cells_retained), icon="🟢")
+                with m4:
+                    render_metric_card("Cells Discarded", str(aud.source_cells_discarded), icon="🟠")
+
+                if aud.discarded_cell_reasons:
+                    reasons_str = ", ".join([f"{k}: {v}" for k, v in aud.discarded_cell_reasons.items()])
+                    st.caption(f"Discarded cell reasons: {reasons_str}")
+
+            st.divider()
+
+            # 6. Actions
+            st.markdown("#### ⚡ Actions")
+            col_sp1, col_sp2, col_sp3 = st.columns(3)
+            with col_sp1:
+                preview_expand = st.checkbox("🔍 Preview Full Repair Effect", key="chk_full_preview_struct")
+
+            with col_sp2:
+                if st.button("✨ Apply Repair", type="primary", key="btn_apply_struct_plan", use_container_width=True):
+                    st.session_state["prev_structural_snapshot"] = df.copy()
+
+                    if struct_plan.proposed_transformation == "unpivot_horizontal_category_blocks":
+                        op = RepairOperation.UNPIVOT_HORIZONTAL_CATEGORY_BLOCKS
+                    elif struct_plan.proposed_transformation == "remove_spacer_rows_cols":
+                        op = RepairOperation.REMOVE_SPACER_ROWS_COLS
+                    elif struct_plan.proposed_transformation == "flatten_multi_headers":
+                        op = RepairOperation.FLATTEN_HEADERS
+                    elif struct_plan.proposed_transformation == "remove_subtotal_elements":
+                        op = RepairOperation.REMOVE_SUBTOTAL_ELEMENTS
+                    elif struct_plan.proposed_transformation == "reconstruct_embedded_records":
+                        op = RepairOperation.RECONSTRUCT_EMBEDDED_RECORDS
+                    else:
+                        op = RepairOperation.AUTO_RECONSTRUCT_STRUCTURE
+
+                    action = RepairAction(
+                        operation=op,
+                        reason=f"Applied structural repair: {struct_plan.detected_issue}",
+                        confidence=struct_plan.confidence,
+                    )
+                    _apply_repairs(df, [action])
+                    st.rerun()
+
+            with col_sp3:
+                if st.button("❌ Reject", key="btn_reject_struct_plan", use_container_width=True):
+                    st.info("Structural transformation rejected. Working dataset structure preserved.")
+
+            if preview_expand:
+                with st.expander("👁️ Full Repair Effect Preview", expanded=True):
+                    if struct_plan.proposed_transformation == "reconstruct_embedded_records":
+                        from services.structure.embedded_records import EmbeddedRecordAnalyzer
+                        preview_df, _ = EmbeddedRecordAnalyzer.reconstruct_dataframe(df)
+                        st.dataframe(make_arrow_safe_preview(preview_df.head(20)), use_container_width=True)
+                    else:
+                        st.json(struct_plan.before_after_sample)
+
+            st.divider()
+
         st.markdown("##### 💥 Unpack / Explode Multi-Value Record Cells")
         st.caption("Detects and explodes rows where multiple values or sub-records are packed into individual cells using delimiters (newlines, commas, pipes, etc.), synchronizing linked columns.")
 
@@ -885,6 +1062,309 @@ def show_repair() -> None:
         elif rename_new_name and not rename_new_name.strip():
             st.warning("⚠️ Column name cannot be empty or whitespace only.")
 
+    # ── Tab: Remove Rows & Columns ──
+    with tab_remove:
+        st.markdown("##### 🗑️ Granular Row & Column Removal")
+        st.caption("Select specific rows and/or columns to delete from the active dataset with safety checks, audit logs, and live impact preview.")
+
+        # Rollback support section
+        if "prev_structural_snapshot" in st.session_state and st.session_state["prev_structural_snapshot"] is not None:
+            if st.button("⏪ Rollback Last Removal / Transformation", key="btn_rollback_remove_tab"):
+                update_dataset(st.session_state["prev_structural_snapshot"])
+                st.session_state["prev_structural_snapshot"] = None
+                st.toast("⏪ Rolled back to dataset version before latest removal.")
+                st.rerun()
+
+        col_rm_left, col_rm_right = st.columns(2)
+
+        with col_rm_left:
+            st.markdown("###### 📄 Row Removal Selection")
+
+            row_sel_mode = st.radio(
+                "Row Selection Method:",
+                options=["By Row Index / Range", "By Column Condition"],
+                key="remove_row_mode",
+                horizontal=True,
+            )
+
+            selected_row_indices: set[int] = set()
+            condition_description: Optional[str] = None
+
+            if row_sel_mode == "By Row Index / Range":
+                total_r = len(df)
+                max_opts = min(1000, total_r)
+                row_opt_list = list(range(max_opts))
+
+                selected_multiselect_indices = st.multiselect(
+                    f"Select Row Indices (0 to {total_r - 1}):",
+                    options=row_opt_list,
+                    key="remove_rows_multiselect",
+                    help="Pick specific row index numbers to drop.",
+                )
+                for idx in selected_multiselect_indices:
+                    selected_row_indices.add(idx)
+
+                range_str = st.text_input(
+                    "Or specify Index Range / List (e.g. 0-5, 10, 15-20):",
+                    key="remove_rows_range_input",
+                    placeholder="e.g. 0-5, 12, 20-25",
+                )
+
+                if range_str and range_str.strip():
+                    try:
+                        parts = [p.strip() for p in range_str.split(",") if p.strip()]
+                        for part in parts:
+                            if "-" in part:
+                                s_e = part.split("-")
+                                if len(s_e) == 2 and s_e[0].isdigit() and s_e[1].isdigit():
+                                    start_i, end_i = int(s_e[0]), int(s_e[1])
+                                    for r_i in range(max(0, start_i), min(total_r, end_i + 1)):
+                                        selected_row_indices.add(r_i)
+                            elif part.isdigit():
+                                r_i = int(part)
+                                if 0 <= r_i < total_r:
+                                    selected_row_indices.add(r_i)
+                    except Exception:
+                        st.caption("⚠️ Invalid range format. Use numbers separated by commas or hyphens (e.g., 0-5, 8).")
+
+            else:  # By Column Condition
+                col_for_cond = st.selectbox(
+                    "Target Column for Condition:",
+                    options=list(df.columns),
+                    key="remove_cond_col",
+                )
+
+                cond_op = st.selectbox(
+                    "Condition Operator:",
+                    options=["is null / missing", "is not null", "equals", "contains", "greater than", "less than"],
+                    key="remove_cond_op",
+                )
+
+                cond_val = ""
+                if cond_op in ["equals", "contains", "greater than", "less than"]:
+                    cond_val = st.text_input("Comparison Value:", key="remove_cond_val")
+
+                if col_for_cond:
+                    series = df[col_for_cond]
+                    if cond_op == "is null / missing":
+                        matched_mask = series.isna() | series.astype(str).str.strip().eq("")
+                        condition_description = f"Rows where `{col_for_cond}` is null/empty"
+                    elif cond_op == "is not null":
+                        matched_mask = ~series.isna() & ~series.astype(str).str.strip().eq("")
+                        condition_description = f"Rows where `{col_for_cond}` is not null"
+                    elif cond_op == "equals":
+                        matched_mask = series.astype(str).str.strip() == cond_val.strip()
+                        condition_description = f"Rows where `{col_for_cond}` == '{cond_val}'"
+                    elif cond_op == "contains":
+                        matched_mask = series.astype(str).str.contains(cond_val, case=False, na=False)
+                        condition_description = f"Rows where `{col_for_cond}` contains '{cond_val}'"
+                    elif cond_op == "greater than":
+                        num_series = pd.to_numeric(series, errors="coerce")
+                        try:
+                            val_num = float(cond_val)
+                            matched_mask = num_series > val_num
+                        except ValueError:
+                            matched_mask = pd.Series(False, index=df.index)
+                        condition_description = f"Rows where `{col_for_cond}` > {cond_val}"
+                    elif cond_op == "less than":
+                        num_series = pd.to_numeric(series, errors="coerce")
+                        try:
+                            val_num = float(cond_val)
+                            matched_mask = num_series < val_num
+                        except ValueError:
+                            matched_mask = pd.Series(False, index=df.index)
+                        condition_description = f"Rows where `{col_for_cond}` < {cond_val}"
+                    else:
+                        matched_mask = pd.Series(False, index=df.index)
+
+                    matched_indices = df.index[matched_mask].tolist()
+                    for idx in matched_indices:
+                        selected_row_indices.add(idx)
+
+                    st.info(f"Condition matches **{len(matched_indices)}** row(s).")
+
+        with col_rm_right:
+            st.markdown("###### 📊 Column Removal Selection")
+
+            selected_cols_to_remove = st.multiselect(
+                "Select Current Dataset Columns to Remove:",
+                options=list(df.columns),
+                key="remove_cols_multiselect",
+                help="Pick column names to delete.",
+            )
+
+        st.divider()
+
+        # ── Before / After Impact Preview ──
+        st.markdown("##### 👁️ Before / After Removal Preview")
+
+        rows_to_remove_list = sorted(list(selected_row_indices))
+        cols_to_remove_list = list(selected_cols_to_remove)
+
+        orig_rows, orig_cols = len(df), len(df.columns)
+        num_rows_rem = len(rows_to_remove_list)
+        num_cols_rem = len(cols_to_remove_list)
+
+        resulting_rows = max(0, orig_rows - num_rows_rem)
+        resulting_cols = max(0, orig_cols - num_cols_rem)
+
+        orig_cells = orig_rows * orig_cols
+        res_cells = resulting_rows * resulting_cols
+        cells_removed = orig_cells - res_cells
+
+        # Metric cards
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        with m_col1:
+            render_metric_card("Original Shape", f"{orig_rows} rows × {orig_cols} cols", icon="📥")
+        with m_col2:
+            render_metric_card("Resulting Shape", f"{resulting_rows} rows × {resulting_cols} cols", icon="🎯")
+        with m_col3:
+            render_metric_card("Rows to Remove", str(num_rows_rem), icon="📄", delta_color="inverse" if num_rows_rem > 0 else "off")
+        with m_col4:
+            render_metric_card("Columns to Remove", str(num_cols_rem), icon="📊", delta_color="inverse" if num_cols_rem > 0 else "off")
+
+        # Detailed card
+        st.markdown(
+            f"""
+            <div style="background-color: #1E293B; border: 2px solid #3B82F6; border-radius: 8px; padding: 16px; margin: 12px 0;">
+                <div style="font-size: 0.85rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+                    Removal Impact Summary
+                </div>
+                <div style="font-size: 1rem; color: #F8FAFC; margin-bottom: 8px;">
+                    Rows to remove: <strong>{num_rows_rem}</strong> ({', '.join(map(str, rows_to_remove_list[:10]))}{'...' if len(rows_to_remove_list) > 10 else ''})<br/>
+                    Columns to remove: <strong>{num_cols_rem}</strong> ({', '.join(cols_to_remove_list) if cols_to_remove_list else 'None'})<br/>
+                    Total cell data reduction: <strong>{cells_removed} cells</strong>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Show preview dataframe if rows or cols selected
+        if num_rows_rem > 0 or num_cols_rem > 0:
+            with st.expander("🔍 Preview Target Dataset (First 10 rows after removal)", expanded=True):
+                preview_df = df.drop(index=rows_to_remove_list, errors="ignore").drop(columns=cols_to_remove_list, errors="ignore").reset_index(drop=True)
+                st.dataframe(make_arrow_safe_preview(preview_df, max_rows=10), use_container_width=True)
+
+        # Safety & Confirmation controls
+        if num_rows_rem == 0 and num_cols_rem == 0:
+            st.info("ℹ️ Select at least one row or column above to enable deletion.")
+        else:
+            st.warning("⚠️ **Warning**: Deleting rows or columns permanently modifies your active dataset. Ensure you have reviewed the preview above.")
+
+        confirm_deletion = st.checkbox(
+            "I explicitly confirm and approve the removal of the selected rows and/or columns.",
+            value=False,
+            key="confirm_row_col_removal_chk",
+            disabled=(num_rows_rem == 0 and num_cols_rem == 0),
+        )
+
+        btn_enabled = (num_rows_rem > 0 or num_cols_rem > 0) and confirm_deletion
+
+        if st.button("🗑️ Delete Selected Rows & Columns", type="primary", disabled=not btn_enabled, key="btn_exec_row_col_removal"):
+            st.session_state["prev_structural_snapshot"] = df.copy()
+
+            action = RepairAction(
+                operation=RepairOperation.REMOVE_ROWS_AND_COLUMNS,
+                target=cols_to_remove_list,
+                parameters={
+                    "row_indices": rows_to_remove_list,
+                    "columns": cols_to_remove_list,
+                    "condition_desc": condition_description,
+                },
+                reason=f"User approved removal of {num_rows_rem} row(s) and {num_cols_rem} column(s)",
+            )
+
+            _apply_repairs(df, [action])
+            st.toast(f"✅ Removed {num_rows_rem} row(s) and {num_cols_rem} column(s) successfully!")
+            st.rerun()
+
+    # ── Tab: Replace Values ──
+    with tab_replace:
+        st.markdown("##### 🔄 Replace Values")
+        st.caption("Select a column, enter a target value, and specify a replacement value (leave empty to remove).")
+
+        col_options = list(df.columns)
+        selected_rep_col = st.selectbox(
+            "Select Column:",
+            options=col_options,
+            key="replace_tab_col_select",
+        )
+
+        col_rv1, col_rv2 = st.columns(2)
+        with col_rv1:
+            val_to_replace = st.text_input(
+                "Value to Replace:",
+                key="replace_tab_val_to_replace",
+                placeholder="e.g. @, #, N/A, unknown, -...",
+            )
+        with col_rv2:
+            replace_with = st.text_input(
+                "Replace With:",
+                key="replace_tab_replace_with",
+                placeholder="e.g. ., space, new value (leave empty to remove)",
+            )
+
+        if selected_rep_col and val_to_replace and len(val_to_replace) > 0:
+            series = df[selected_rep_col].dropna().astype(str)
+            affected_mask = series.str.contains(val_to_replace, regex=False)
+            affected_indices = series[affected_mask].index.tolist()
+            affected_count = len(affected_indices)
+
+            rep_display = f"<code>{replace_with}</code>" if replace_with != "" else "<span style='color: #F59E0B; font-weight: 700;'>[REMOVE / EMPTY]</span>"
+
+            st.markdown(
+                f"""
+                <div style="background-color: #1E293B; border: 2px solid #3B82F6; border-radius: 8px; padding: 16px; margin: 12px 0;">
+                    <div style="font-size: 0.85rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+                        Replacement Impact Preview
+                    </div>
+                    <div style="font-size: 1rem; color: #F8FAFC; margin-bottom: 8px;">
+                        Column: <strong><code>{selected_rep_col}</code></strong><br/>
+                        Value being replaced: <strong><code>{val_to_replace}</code></strong><br/>
+                        Replacement: <strong>{rep_display}</strong><br/>
+                        Affected cells: <strong>{affected_count}</strong>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if affected_count > 0:
+                preview_df_rows = []
+                for idx in affected_indices[:10]:
+                    orig_val = str(df[selected_rep_col].loc[idx])
+                    new_val = orig_val.replace(val_to_replace, replace_with)
+                    preview_df_rows.append({
+                        "Row Index": idx,
+                        "BEFORE": orig_val,
+                        "AFTER": new_val,
+                    })
+                st.markdown("**Sample Affected Cells (Before vs After):**")
+                st.dataframe(pd.DataFrame(preview_df_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info(f"No cells in column `{selected_rep_col}` contain `{val_to_replace}`.")
+
+            btn_enabled = affected_count > 0
+            if st.button("🔄 Apply Replacement", type="primary", disabled=not btn_enabled, key="btn_apply_replace_tab"):
+                st.session_state["prev_structural_snapshot"] = df.copy()
+
+                action = RepairAction(
+                    operation=RepairOperation.REPLACE_VALUES,
+                    target=[selected_rep_col],
+                    parameters={
+                        "column": selected_rep_col,
+                        "old_value": val_to_replace,
+                        "new_value": replace_with,
+                    },
+                    reason=f"Replaced '{val_to_replace}' with '{replace_with if replace_with != '' else '[EMPTY]'}' in column '{selected_rep_col}'",
+                )
+                _apply_repairs(df, [action])
+                st.toast(f"✅ Replaced '{val_to_replace}' in '{selected_rep_col}' successfully!")
+                st.rerun()
+        else:
+            st.info("ℹ️ Enter a target value to replace above to inspect the impact preview.")
+
     with tab_reset:
         st.warning("⚠️ Reverts all repairs and restores the original untouched dataset.")
         if st.button("🔄 Reset to Original Dataset", type="secondary"):
@@ -928,6 +1408,13 @@ def show_repair() -> None:
                         detail_str = f"`{old}` → `{new}`"
                 elif r.details.get("repair_type") == "column_drop":
                     detail_str = f"Dropped `{r.details.get('column_dropped')}`"
+                elif r.details.get("repair_type") == "row_drop":
+                    rem_rows = r.details.get("removed_row_indices", [])
+                    detail_str = f"Removed {len(rem_rows)} row(s)"
+                elif r.details.get("repair_type") == "row_col_drop":
+                    rem_rows = r.details.get("removed_row_indices", [])
+                    rem_cols = r.details.get("removed_column_names", [])
+                    detail_str = f"Removed {len(rem_rows)} row(s), {len(rem_cols)} col(s)"
                 elif "reason" in r.details:
                     detail_str = str(r.details["reason"])
 
@@ -969,8 +1456,8 @@ def show_repair() -> None:
     preview = make_arrow_safe_preview(df, max_rows=50)
     st.dataframe(preview, use_container_width=True)
 
-    # Download button (all dates exported in standardized DD-MM-YY format)
-    csv_bytes = df.to_csv(index=False, date_format="%d-%m-%y").encode("utf-8")
+    # Download button (clean index-free export, dates in DD-MM-YY format)
+    csv_bytes = ExportService.export_csv(df, date_format="%d-%m-%y")
     st.download_button(
         label="📥 Download Clean Dataset (CSV)",
         data=csv_bytes,

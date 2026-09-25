@@ -574,3 +574,292 @@ def rename_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, RepairRecord]:
     )
 
     return result, record
+
+
+def remove_specific_columns(
+    df: pd.DataFrame, columns: list[str], reason: str = ""
+) -> tuple[pd.DataFrame, RepairRecord]:
+    """Safely drop multiple columns upon explicit user request.
+
+    Args:
+        df: Source DataFrame (not modified).
+        columns: List of column names to drop.
+        reason: Optional justification.
+
+    Returns:
+        Tuple of (repaired DataFrame, RepairRecord).
+    """
+    if not columns:
+        raise RepairValidationError("No columns specified for removal.")
+
+    invalid_cols = [c for c in columns if c not in df.columns]
+    if invalid_cols:
+        raise RepairValidationError(f"Columns not found in dataset: {invalid_cols}")
+
+    result = df.drop(columns=columns)
+
+    now_ts = datetime.now()
+    record = RepairRecord(
+        operation="remove_columns",
+        timestamp=now_ts,
+        rows_before=len(df),
+        rows_after=len(result),
+        columns_before=len(df.columns),
+        columns_after=len(result.columns),
+        success=True,
+        reason=reason or f"Removed {len(columns)} column(s): {', '.join(columns)}",
+        status="applied",
+        details={
+            "repair_type": "column_drop",
+            "removed_column_names": columns,
+            "original_shape": (len(df), len(df.columns)),
+            "resulting_shape": (len(result), len(result.columns)),
+            "timestamp": now_ts.isoformat(),
+            "user_approved_action": "remove_columns",
+            "user_approved": True,
+            "reason": reason or f"Explicit user deletion of columns: {', '.join(columns)}",
+        },
+    )
+
+    logger.info("Removed {} column(s): {}", len(columns), columns)
+    return result, record
+
+
+def remove_specific_rows(
+    df: pd.DataFrame,
+    row_indices: list[int],
+    condition_desc: Optional[str] = None,
+    reason: str = "",
+) -> tuple[pd.DataFrame, RepairRecord]:
+    """Safely drop multiple rows by index or condition.
+
+    Args:
+        df: Source DataFrame (not modified).
+        row_indices: List of row index numbers (0..N-1) to drop.
+        condition_desc: Optional description of condition used.
+        reason: Optional justification.
+
+    Returns:
+        Tuple of (repaired DataFrame, RepairRecord).
+    """
+    if not row_indices:
+        raise RepairValidationError("No row indices specified for removal.")
+
+    valid_indices = set(range(len(df)))
+    invalid_indices = [idx for idx in row_indices if idx not in valid_indices]
+    if invalid_indices:
+        raise RepairValidationError(f"Row indices out of range (0-{len(df)-1}): {invalid_indices[:5]}")
+
+    unique_indices = sorted(list(set(row_indices)))
+    result = df.drop(index=unique_indices).reset_index(drop=True)
+
+    now_ts = datetime.now()
+    record = RepairRecord(
+        operation="remove_rows",
+        timestamp=now_ts,
+        rows_before=len(df),
+        rows_after=len(result),
+        columns_before=len(df.columns),
+        columns_after=len(result.columns),
+        success=True,
+        reason=reason or f"Removed {len(unique_indices)} row(s)",
+        status="applied",
+        details={
+            "repair_type": "row_drop",
+            "removed_row_indices": unique_indices,
+            "condition": condition_desc,
+            "original_shape": (len(df), len(df.columns)),
+            "resulting_shape": (len(result), len(result.columns)),
+            "timestamp": now_ts.isoformat(),
+            "user_approved_action": "remove_rows",
+            "user_approved": True,
+            "reason": reason or f"Explicit user deletion of {len(unique_indices)} row(s)",
+        },
+    )
+
+    logger.info("Removed {} row(s). Condition: {}", len(unique_indices), condition_desc)
+    return result, record
+
+
+def remove_rows_and_columns(
+    df: pd.DataFrame,
+    row_indices: Optional[list[int]] = None,
+    columns: Optional[list[str]] = None,
+    condition_desc: Optional[str] = None,
+    reason: str = "",
+) -> tuple[pd.DataFrame, RepairRecord]:
+    """Safely drop rows and/or columns in a single atomic repair operation.
+
+    Args:
+        df: Source DataFrame (not modified).
+        row_indices: List of row index numbers (0..N-1) to drop.
+        columns: List of column names to drop.
+        condition_desc: Optional condition description.
+        reason: Optional justification.
+
+    Returns:
+        Tuple of (repaired DataFrame, RepairRecord).
+    """
+    rows_to_drop = sorted(list(set(row_indices))) if row_indices else []
+    cols_to_drop = list(columns) if columns else []
+
+    if not rows_to_drop and not cols_to_drop:
+        raise RepairValidationError("Neither rows nor columns specified for removal.")
+
+    result = df.copy()
+
+    if cols_to_drop:
+        invalid_cols = [c for c in cols_to_drop if c not in result.columns]
+        if invalid_cols:
+            raise RepairValidationError(f"Columns not found in dataset: {invalid_cols}")
+        result = result.drop(columns=cols_to_drop)
+
+    if rows_to_drop:
+        valid_indices = set(range(len(result)))
+        invalid_indices = [idx for idx in rows_to_drop if idx not in valid_indices]
+        if invalid_indices:
+            raise RepairValidationError(f"Row indices out of range (0-{len(df)-1}): {invalid_indices[:5]}")
+        result = result.drop(index=rows_to_drop).reset_index(drop=True)
+
+    now_ts = datetime.now()
+    record = RepairRecord(
+        operation="remove_rows_and_columns",
+        timestamp=now_ts,
+        rows_before=len(df),
+        rows_after=len(result),
+        columns_before=len(df.columns),
+        columns_after=len(result.columns),
+        success=True,
+        reason=reason or f"Removed {len(rows_to_drop)} row(s) and {len(cols_to_drop)} column(s)",
+        status="applied",
+        details={
+            "repair_type": "row_col_drop",
+            "removed_row_indices": rows_to_drop,
+            "removed_column_names": cols_to_drop,
+            "condition": condition_desc,
+            "original_shape": (len(df), len(df.columns)),
+            "resulting_shape": (len(result), len(result.columns)),
+            "timestamp": now_ts.isoformat(),
+            "user_approved_action": "remove_rows_and_columns",
+            "user_approved": True,
+            "reason": reason or f"User deleted {len(rows_to_drop)} row(s) and {len(cols_to_drop)} column(s)",
+        },
+    )
+
+    logger.info(
+        "Removed {} row(s) and {} column(s)",
+        len(rows_to_drop),
+        len(cols_to_drop),
+    )
+    return result, record
+
+
+def replace_value_in_column(
+    df: pd.DataFrame,
+    column: str,
+    old_value: str,
+    new_value: str = "",
+    reason: str = "",
+) -> tuple[pd.DataFrame, RepairRecord]:
+    """Replace specific string/value occurrences within a target column.
+
+    Does NOT delete rows or columns.
+    Does NOT perform extra unapproved cleaning.
+    Supports empty replacement (new_value="") which removes the target substring/value.
+
+    Args:
+        df: Source DataFrame (not modified).
+        column: Name of target column.
+        old_value: Value/string to find and replace.
+        new_value: Replacement value/string (default="" to remove).
+        reason: Optional justification string.
+
+    Returns:
+        Tuple of (repaired DataFrame, RepairRecord).
+    """
+    if column not in df.columns:
+        raise RepairValidationError(f"Column '{column}' not found in dataset.")
+
+    if old_value is None or not isinstance(old_value, str) or len(old_value) == 0:
+        raise RepairValidationError("Value to replace cannot be empty.")
+
+    result = df.copy()
+    series = result[column]
+
+    # Find affected rows & cells before modification
+    non_null_mask = series.notna()
+    str_series = series[non_null_mask].astype(str)
+    affected_mask = str_series.str.contains(old_value, regex=False)
+    affected_row_indices = str_series.index[affected_mask].tolist()
+    affected_cell_count = len(affected_row_indices)
+
+    if affected_cell_count > 0:
+        # Perform exact literal string replacement on non-null values
+        replaced_series = str_series.str.replace(old_value, new_value, regex=False)
+        
+        # Cast to object dtype before assignment to prevent categorical or incompatible dtype warnings
+        if not pd.api.types.is_object_dtype(result[column].dtype):
+            result[column] = result[column].astype(object)
+
+        result.loc[affected_row_indices, column] = replaced_series.loc[affected_row_indices]
+
+        # Preserve numeric, datetime, or categorical dtypes where possible
+        orig_dtype = series.dtype
+        if pd.api.types.is_numeric_dtype(orig_dtype):
+            num_converted = pd.to_numeric(result[column], errors="coerce")
+            if num_converted.notna().sum() == result[column].notna().sum():
+                result[column] = num_converted
+        elif pd.api.types.is_datetime64_any_dtype(orig_dtype):
+            dt_converted = pd.to_datetime(result[column], errors="coerce")
+            if dt_converted.notna().sum() == result[column].notna().sum():
+                result[column] = dt_converted
+        elif isinstance(orig_dtype, pd.CategoricalDtype):
+            try:
+                result[column] = result[column].astype("category")
+            except Exception:
+                pass
+
+    now_ts = datetime.now()
+    rep_display = new_value if new_value != "" else "[REMOVE / EMPTY]"
+    record = RepairRecord(
+        operation="replace_values",
+        timestamp=now_ts,
+        rows_before=len(df),
+        rows_after=len(result),
+        columns_before=len(df.columns),
+        columns_after=len(result.columns),
+        success=True,
+        column=column,
+        issue_type="FORMAT",
+        original_value=old_value,
+        new_value=rep_display,
+        method="user_specified_replacement",
+        confidence=1.0,
+        reason=reason or f"Replaced '{old_value}' with '{rep_display}' in column '{column}'",
+        status="applied",
+        risk_level="safe",
+        details={
+            "repair_type": "replace_values",
+            "column": column,
+            "old_value": old_value,
+            "new_value": new_value,
+            "is_empty_replacement": (new_value == ""),
+            "affected_cell_count": affected_cell_count,
+            "affected_row_indices": affected_row_indices,
+            "original_shape": (len(df), len(df.columns)),
+            "resulting_shape": (len(result), len(result.columns)),
+            "timestamp": now_ts.isoformat(),
+            "user_approved_action": "replace_values",
+            "user_approved": True,
+        },
+    )
+
+    logger.info(
+        "Replaced '{}' with '{}' in column '{}' ({} cells affected)",
+        old_value,
+        rep_display,
+        column,
+        affected_cell_count,
+    )
+    return result, record
+

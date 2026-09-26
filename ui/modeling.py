@@ -22,7 +22,7 @@ def show_modeling() -> None:
     """Render the AutoML Modeling page."""
     render_page_header(
         title="AutoML Modeling",
-        description="Automated machine learning pipeline: candidate target suggestion, model benchmark leaderboard, and predictive feature importance rankings.",
+        description="Automated machine learning pipeline: candidate target suggestion, ML readiness report, model benchmark leaderboard, and predictive feature importance rankings.",
         icon="⚙️",
     )
 
@@ -70,6 +70,42 @@ def show_modeling() -> None:
     with col3:
         test_split = st.slider("Test Split Size:", min_value=0.1, max_value=0.4, value=0.2, step=0.05)
 
+    # ── ML Readiness Report Preview ──
+    readiness = MLPlanner.generate_ml_readiness_report(df, target_col)
+    t_qual = readiness["target_quality"]
+    f_anal = readiness["feature_analysis"]
+
+    with st.expander("📋 View ML Readiness & Feature Quality Report", expanded=False):
+        st.markdown("### Target Variable Inspection")
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            render_metric_card("Total Rows", f"{readiness['total_rows']:,}")
+        with m2:
+            render_metric_card("Valid Target Rows", f"{t_qual['valid_count']:,}")
+        with m3:
+            render_metric_card("Missing Target Rows", f"{t_qual['missing_count']:,}")
+        with m4:
+            render_metric_card("Target Unique Values", f"{t_qual['unique_count']:,}")
+
+        if not t_qual["is_valid"]:
+            st.error(f"❌ **Target Unfit for Modeling:** {t_qual['reason']}")
+
+        st.markdown("### Predictive Feature Categorization")
+        st.markdown(
+            f"- **Usable Predictive Features:** `{f_anal['usable_features_count']}`\n"
+            f"  - Numeric features: `{len(f_anal['numeric_cols'])}` (`{', '.join(f_anal['numeric_cols']) if f_anal['numeric_cols'] else 'None'}`)\n"
+            f"  - Categorical features: `{len(f_anal['categorical_cols'])}` (`{', '.join(f_anal['categorical_cols']) if f_anal['categorical_cols'] else 'None'}`)\n"
+            f"  - Datetime features: `{len(f_anal['datetime_cols'])}` (`{', '.join(f_anal['datetime_cols']) if f_anal['datetime_cols'] else 'None'}`)\n"
+            f"  - Free-text features: `{len(f_anal['text_cols'])}` (`{', '.join(f_anal['text_cols']) if f_anal['text_cols'] else 'None'}`)"
+        )
+
+        if f_anal["dropped_features"]:
+            st.markdown("#### Excluded Features (Identifiers & Zero-Variance)")
+            dropped_df = pd.DataFrame([
+                {"Column": k, "Exclusion Reason": v} for k, v in f_anal["dropped_features"].items()
+            ])
+            st.dataframe(dropped_df, use_container_width=True, hide_index=True)
+
     # ── Train Button ──
     if st.button("🚀 Train & Benchmark Models", type="primary", use_container_width=True):
         try:
@@ -81,7 +117,10 @@ def show_modeling() -> None:
                     test_size=test_split,
                 )
             st.session_state["automl_summary"] = summary
-            st.toast(f"✅ Trained and benchmarked {len(summary.leaderboard)} models!")
+            if summary.leaderboard:
+                st.toast(f"✅ Trained and benchmarked {len(summary.leaderboard)} models!")
+            else:
+                st.error("Training aborted due to dataset or target limitations.")
         except Exception as e:
             logger.exception("AutoML Training failed: {}", str(e))
             st.error(f"❌ Training failed: {str(e)}")
@@ -91,68 +130,81 @@ def show_modeling() -> None:
     # ── Leaderboard & Results ──
     summary: Optional[AutoMLSummary] = st.session_state.get("automl_summary")
     if summary and summary.target_column == target_col:
-        render_section_header("Model Benchmark Leaderboard", icon="🏆")
-        st.markdown(f"**Top Performing Algorithm:** ⭐ `{summary.best_model_name}`")
+        if summary.warnings:
+            for w in summary.warnings:
+                st.warning(f"⚠️ **ML Warning:** {w}")
 
-        # Leaderboard Table
-        board_rows = []
-        for i, res in enumerate(summary.leaderboard, 1):
-            row_dict = {
-                "Rank": f"#{i}",
-                "Model": res.model_name,
-                f"Primary Metric ({res.primary_metric_name})": f"{res.primary_metric_value:.4f}",
-                "Train Score": f"{res.train_score:.4f}",
-                "Fit Time": f"{res.fit_time_seconds:.3f}s",
-            }
-            for k, v in res.metrics.items():
-                if k != res.primary_metric_name:
-                    row_dict[k] = f"{v:.4f}"
-            board_rows.append(row_dict)
+        if summary.leaderboard:
+            render_section_header("Model Benchmark Leaderboard", icon="🏆")
+            st.markdown(
+                f"**Top Performing Algorithm:** ⭐ `{summary.best_model_name}` | "
+                f"**Baseline Model:** 🎯 `{summary.baseline_model_name}` ({summary.baseline_metric_value:.4f})"
+            )
 
-        board_df = pd.DataFrame(board_rows)
-        st.dataframe(board_df, use_container_width=True, hide_index=True)
+            # Leaderboard Table
+            board_rows = []
+            for i, res in enumerate(summary.leaderboard, 1):
+                role = "🎯 Baseline" if res.is_baseline else ("⭐ Best" if i == 1 else "Model")
+                row_dict = {
+                    "Rank": f"#{i}",
+                    "Role": role,
+                    "Model": res.model_name,
+                    f"Primary Metric ({res.primary_metric_name})": f"{res.primary_metric_value:.4f}",
+                    "Train Score": f"{res.train_score:.4f}",
+                    "CV Mean": f"{res.cv_score_mean:.4f} ± {res.cv_score_std:.4f}" if res.cv_score_mean else "N/A",
+                    "Fit Time": f"{res.fit_time_seconds:.3f}s",
+                }
+                for k, v in res.metrics.items():
+                    if k not in (res.primary_metric_name, "CV R² Mean", "CV R² Std", "CV Accuracy Mean"):
+                        row_dict[k] = f"{v:.4f}"
+                board_rows.append(row_dict)
 
-        # Leaderboard Bar Chart
-        lead_chart_df = pd.DataFrame([
-            {
-                "model_name": res.model_name,
-                "primary_metric_value": res.primary_metric_value,
-            }
-            for res in summary.leaderboard
-        ])
-        fig_bar = px.bar(
-            lead_chart_df,
-            x="model_name",
-            y="primary_metric_value",
-            color="primary_metric_value",
-            color_continuous_scale="Blues",
-            labels={"model_name": "Model", "primary_metric_value": summary.leaderboard[0].primary_metric_name},
-            title=f"Model Performance Comparison ({summary.leaderboard[0].primary_metric_name})",
-            template="plotly_dark",
-        )
-        fig_bar.update_layout(paper_bgcolor="#1E293B", plot_bgcolor="#1E293B")
-        st.plotly_chart(fig_bar, use_container_width=True)
+            board_df = pd.DataFrame(board_rows)
+            st.dataframe(board_df, use_container_width=True, hide_index=True)
 
-        st.divider()
-
-        # ── Feature Importances ──
-        if summary.feature_importances:
-            render_section_header("Predictive Feature Importance", icon="🔍")
-            imp_df = pd.DataFrame([
-                {"Feature": item.feature, "Importance": item.importance}
-                for item in summary.feature_importances[:20]
+            # Leaderboard Bar Chart
+            lead_chart_df = pd.DataFrame([
+                {
+                    "model_name": res.model_name,
+                    "primary_metric_value": res.primary_metric_value,
+                    "is_baseline": "Baseline" if res.is_baseline else "Candidate Model",
+                }
+                for res in summary.leaderboard
             ])
-            fig_imp = px.bar(
-                imp_df,
-                x="Importance",
-                y="Feature",
-                orientation="h",
-                title="Top Predictive Features",
-                color="Importance",
-                color_continuous_scale="Viridis",
+            fig_bar = px.bar(
+                lead_chart_df,
+                x="model_name",
+                y="primary_metric_value",
+                color="is_baseline",
+                color_discrete_map={"Candidate Model": "#3B82F6", "Baseline": "#64748B"},
+                labels={"model_name": "Model", "primary_metric_value": summary.leaderboard[0].primary_metric_name},
+                title=f"Model Performance vs Baseline ({summary.leaderboard[0].primary_metric_name})",
                 template="plotly_dark",
             )
-            fig_imp.update_layout(paper_bgcolor="#1E293B", plot_bgcolor="#1E293B", yaxis={"autorange": "reversed"})
-            st.plotly_chart(fig_imp, use_container_width=True)
+            fig_bar.update_layout(paper_bgcolor="#1E293B", plot_bgcolor="#1E293B")
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+            st.divider()
+
+            # ── Feature Importances ──
+            if summary.feature_importances:
+                render_section_header("Predictive Feature Importance", icon="🔍")
+                st.caption("ℹ️ Feature importance reflects predictive association and decision influence within the model, not direct causal effect.")
+                imp_df = pd.DataFrame([
+                    {"Feature": item.feature, "Importance": item.importance}
+                    for item in summary.feature_importances[:20]
+                ])
+                fig_imp = px.bar(
+                    imp_df,
+                    x="Importance",
+                    y="Feature",
+                    orientation="h",
+                    title="Top Predictive Features",
+                    color="Importance",
+                    color_continuous_scale="Viridis",
+                    template="plotly_dark",
+                )
+                fig_imp.update_layout(paper_bgcolor="#1E293B", plot_bgcolor="#1E293B", yaxis={"autorange": "reversed"})
+                st.plotly_chart(fig_imp, use_container_width=True)
     else:
         st.info("👆 Click **'Train & Benchmark Models'** above to run automated modeling on your clean dataset.")

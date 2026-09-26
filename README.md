@@ -3,7 +3,7 @@ https://autods-ai-studio.streamlit.app/
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.30+-FF4B4B.svg)](https://streamlit.io)
-[![Tests](https://img.shields.io/badge/tests-434%20passed-brightgreen.svg)](https://pytest.org)
+[![Tests](https://img.shields.io/badge/tests-453%20passed-brightgreen.svg)](https://pytest.org)
 
 **AutoDS AI Studio** is a production-grade, AI-powered autonomous data science and analytics platform built with **Streamlit**, **Pandas**, **Scikit-Learn**, **OpenRouter LLMs**, and **Python**.
 
@@ -115,11 +115,15 @@ It features a strict **deterministic-first architecture** with an intelligent AI
 - Interactive Plotly visualizations for correlation heatmaps, missing value matrices, univariate feature distributions, and bivariate scatter/boxplots.
 - AI EDA Analyst providing natural-language interpretations of statistical patterns.
 
-### 11. ⚙️ AutoML Modeling & Explainability
+### 11. ⚙️ AutoML Modeling, Leak-Free Pipelines & Explainability
 - Auto-detects task type: **Binary Classification**, **Multiclass Classification**, or **Regression**.
-- Benchmarks multiple Scikit-Learn models (Random Forest, Gradient Boosting, Logistic Regression, Ridge, Decision Trees).
-- Displays real-time leaderboard with evaluation metrics (Accuracy, F1, Precision, Recall, RMSE, MAE, R²).
-- Model explainability providing feature importance rankings, drivers, and diagnostic insights.
+- Value-based datetime detection and leak-free temporal feature extraction (`year`, `month`, `day`, `dayofweek`, `hour`, `days_elapsed` relative to training set max date).
+- Excludes high-cardinality non-temporal identifier columns (e.g. `customer_id`, UUIDs) while retaining high-cardinality date features.
+- Benchmarks multiple Scikit-Learn models (Random Forest, Gradient Boosting, HistGradientBoosting, Logistic Regression, Ridge, Decision Trees) against Dummy Baselines.
+- Stratified 5-Fold Cross-Validation for classification and 5-Fold CV for regression.
+- Displays real-time leaderboard with evaluation metrics (Accuracy, F1, Precision, Recall, ROC-AUC, RMSE, MAE, R², CV Mean ± Std).
+- Stores exact fitted Scikit-Learn `Pipeline` (`best_pipeline`) connected directly to Explainability and prediction workflows.
+- Model explainability providing feature importance rankings mapped back to clean human-readable feature names, key drivers, and diagnostic insights with non-causation disclaimers.
 
 ### 12. 🧠 AI Data Scientist Mission Control & Executive Reports
 - 6-stage unified analysis pipeline: Profile → EDA → AutoML → Explainability → AI Insights → Executive Report.
@@ -204,7 +208,7 @@ AutoDS-AI-Studio/
 │   ├── number_parser.py           # Natural language number & magnitude parser
 │   └── json_sanitizer.py          # Re-export for centralized JSON sanitization
 │
-└── tests/                         # Automated Unit & Integration Test Suite (434 Tests)
+└── tests/                         # Automated Unit & Integration Test Suite (453 Tests)
     ├── test_ai.py                 # AI planner, structure reasoning & repair plan tests
     ├── test_cleaning.py           # Cleaning execution tests
     ├── test_column_management.py  # Column renaming & standardization tests
@@ -224,6 +228,8 @@ AutoDS-AI-Studio/
     ├── test_llm.py                # OpenRouter LLM orchestration tests
     ├── test_ml.py                 # AutoML training & evaluation tests
     ├── test_ml_ai_planner.py      # ML AI planner tests
+    ├── test_ml_integration_audit.py # End-to-end ML integration, fitted pipeline, state invalidation & error boundary tests
+    ├── test_ml_pipeline_robustness.py # Robust ML pipeline & datetime feature scenario benchmarks
     ├── test_natural_language_number_normalization.py # Natural language number tests
     ├── test_pipeline.py           # 1-click pipeline integration tests
     ├── test_profiler.py           # Dataset profiler tests
@@ -291,7 +297,7 @@ Open your browser at `http://localhost:8501`.
 
 ## 🧪 Running the Test Suite
 
-Run all **434 automated tests** using pytest:
+Run all **453 automated tests** using pytest:
 
 ```bash
 pytest -v

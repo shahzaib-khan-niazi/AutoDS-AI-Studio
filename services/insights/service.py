@@ -79,10 +79,14 @@ Output valid JSON matching this schema:
             }
 
         if automl_summary:
+            best_eval = next((r for r in automl_summary.leaderboard if r.model_name == automl_summary.best_model_name), None)
+            best_score_str = f"{best_eval.primary_metric_name} = {best_eval.primary_metric_value:.4f}" if best_eval else "N/A"
             payload["ml_summary"] = {
                 "target": automl_summary.target_column,
                 "task": automl_summary.task_type.value,
                 "best_model": automl_summary.best_model_name,
+                "best_model_score": best_score_str,
+                "baseline_model": f"{automl_summary.baseline_model_name} ({automl_summary.baseline_metric_value:.4f})",
                 "features_count": len(automl_summary.features_used),
             }
 
